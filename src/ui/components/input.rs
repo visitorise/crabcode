@@ -248,6 +248,32 @@ impl Input {
         }
     }
 
+    /// Native collapse: with an active selection, plain Left/Right clears
+    /// the highlight and jumps the caret to the selection edge (Left ->
+    /// start, Right -> end) instead of moving one char from the cursor.
+    /// Returns false when there is no selection to collapse.
+    fn collapse_selection_to_edge(&mut self, to_start: bool) -> bool {
+        let Some(((start_row, start_col), (end_row, end_col))) = self.textarea.selection_range()
+        else {
+            return false;
+        };
+        if (start_row, start_col) == (end_row, end_col) {
+            return false;
+        }
+        self.reveal_cursor_after_key_input();
+        self.preferred_visual_col = None;
+        let (row, col) = if to_start {
+            (start_row, start_col)
+        } else {
+            (end_row, end_col)
+        };
+        self.textarea.cancel_selection();
+        self.clear_selection_drag_state();
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, col as u16));
+        true
+    }
+
     /// Option+Arrow word jump (mirrors tui-textarea's Ctrl+Arrow handling,
     /// which terminals don't send for macOS Option). With `extend`, behaves
     /// like Shift+Arrow: starts/continues the selection instead of clearing.
@@ -821,6 +847,18 @@ impl Input {
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            // Native behavior: plain Left/Right with an active selection
+            // collapses to the selection edge (Left -> start, Right -> end).
+            // Must come before the generic textarea.input() fallback, which
+            // would otherwise move one char from the cursor.
+            KeyCode::Left if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(true);
+                true
+            }
+            KeyCode::Right if event.modifiers == KeyModifiers::NONE && self.has_selection() => {
+                self.collapse_selection_to_edge(false);
+                true
+            }
             // Native behavior: Backspace/Delete with an active selection
             // erases the selection. These must come before the placeholder
             // fast-paths so a selection containing a placeholder deletes
@@ -3628,6 +3666,49 @@ mod tests {
         assert!(input.has_selection());
         assert_eq!(input.get_selected_text(), "hello world");
         assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn plain_arrows_collapse_multiline_unicode_selection() {
+        for backwards in [false, true] {
+            for arrow in [KeyCode::Left, KeyCode::Right] {
+                let mut input = Input::new();
+                input.insert_str("aé🙂\n中xyz");
+                let (start, end) = ((0, 1), (1, 2));
+                let (anchor, edge) = if backwards {
+                    (end, start)
+                } else {
+                    (start, end)
+                };
+                input
+                    .textarea
+                    .move_cursor(CursorMove::Jump(anchor.0, anchor.1));
+                input.textarea.start_selection();
+                input.textarea.move_cursor(CursorMove::Jump(edge.0, edge.1));
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert!(!input.has_selection());
+                assert_eq!(input.get_text(), "aé🙂\n中xyz");
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 1)
+                    } else {
+                        (1, 2)
+                    }
+                );
+
+                assert!(input.handle_event(key_event(arrow)));
+                assert_eq!(
+                    input.textarea.cursor(),
+                    if arrow == KeyCode::Left {
+                        (0, 0)
+                    } else {
+                        (1, 3)
+                    }
+                );
+            }
+        }
     }
 
     #[test]

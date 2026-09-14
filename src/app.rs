@@ -5029,11 +5029,11 @@ impl App {
                 self.selection_action_bar = None;
             }
         } else if self.selection_action_bar.is_some() {
-            // Editing keys natively delete/replace the input selection
-            // (Backspace erases it, typing replaces it). Dismissing first
-            // would collapse the selection so the edit lands on a single
-            // cursor instead — preserve it and let the input handle it.
-            if self.input.has_selection() && Self::is_input_edit_key(key) {
+            // Let the input use the selection for edits and plain-arrow
+            // collapse. Dismissing it here loses the boundaries first.
+            let collapses_selection = key.modifiers == KeyModifiers::NONE
+                && matches!(key.code, KeyCode::Left | KeyCode::Right);
+            if self.input.has_selection() && (Self::is_input_edit_key(key) || collapses_selection) {
                 self.chat_state.chat.selection.clear();
                 self.jobs_dialog_state.clear_selection();
                 self.pending_chat_message_click = None;
@@ -14465,6 +14465,70 @@ mod tests {
         assert_eq!(app.input.get_text(), "`alpha`");
         assert!(app.selection_action_bar.is_none());
         assert!(!app.chat_state.chat.has_selection());
+    }
+
+    #[test]
+    fn input_selection_plain_arrows_collapse_through_app() {
+        for source in ["mouse", "shift", "option-shift"] {
+            for backwards in [false, true] {
+                for arrow in [KeyCode::Left, KeyCode::Right] {
+                    let mut app = test_app();
+                    app.base_focus = BaseFocus::Chat;
+                    app.last_frame_size = ratatui::layout::Rect::new(0, 0, 80, 24);
+                    app.input.set_text("alpha beta");
+                    app.input
+                        .set_textarea_area_for_test(ratatui::layout::Rect::new(2, 20, 20, 1));
+                    let (anchor, edge) = if backwards { (10, 6) } else { (6, 10) };
+                    if source == "mouse" {
+                        for (kind, col) in [
+                            (MouseEventKind::Down(MouseButton::Left), anchor),
+                            (MouseEventKind::Drag(MouseButton::Left), edge),
+                            (MouseEventKind::Up(MouseButton::Left), edge),
+                        ] {
+                            app.handle_input_mouse_event(mouse(kind, col + 2, 20));
+                        }
+                    } else {
+                        app.handle_keys(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+                        for _ in 0..anchor {
+                            app.handle_keys(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+                        }
+                        let direction = if backwards {
+                            KeyCode::Left
+                        } else {
+                            KeyCode::Right
+                        };
+                        let (modifiers, count) = if source == "shift" {
+                            (KeyModifiers::SHIFT, 4)
+                        } else {
+                            (KeyModifiers::ALT | KeyModifiers::SHIFT, 1)
+                        };
+                        for _ in 0..count {
+                            app.handle_keys(KeyEvent::new(direction, modifiers));
+                        }
+                    }
+                    assert_eq!(app.input.get_selected_text(), "beta");
+                    assert_eq!(
+                        app.selection_action_bar.map(|state| state.target),
+                        Some(SelectionActionTarget::Input),
+                    );
+
+                    app.handle_keys(KeyEvent::new(arrow, KeyModifiers::NONE));
+                    assert!(!app.input.has_selection());
+                    assert!(app.selection_action_bar.is_none());
+                    assert_eq!(app.input.get_text(), "alpha beta");
+                    app.handle_keys(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+                    assert_eq!(
+                        app.input.get_text(),
+                        if arrow == KeyCode::Left {
+                            "alpha !beta"
+                        } else {
+                            "alpha beta!"
+                        },
+                        "{source}, backwards={backwards}, arrow={arrow:?}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
