@@ -3590,6 +3590,43 @@ impl App {
             )
     }
 
+    /// Keys that natively operate on an input selection (delete/replace it)
+    /// instead of merely dismissing it: Backspace/Delete erase the selection,
+    /// printable characters and newline shortcuts replace it, and word/line
+    /// delete and cut/paste act on the selection first.
+    fn is_input_edit_key(key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Backspace | KeyCode::Delete => true,
+            KeyCode::Enter
+                if key.modifiers.contains(event::KeyModifiers::SHIFT)
+                    || key.modifiers.contains(event::KeyModifiers::ALT) =>
+            {
+                true
+            }
+            KeyCode::Char('j' | 'w' | 'u' | 'x' | 'y')
+                if key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    && !key.modifiers.intersects(
+                        event::KeyModifiers::ALT
+                            | event::KeyModifiers::SUPER
+                            | event::KeyModifiers::META,
+                    ) =>
+            {
+                true
+            }
+            KeyCode::Char(_)
+                if !key.modifiers.intersects(
+                    event::KeyModifiers::CONTROL
+                        | event::KeyModifiers::ALT
+                        | event::KeyModifiers::SUPER
+                        | event::KeyModifiers::META,
+                ) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Mirror the mouse-drag behavior for keyboard selections: show the `y`
     /// copy bar as soon as Shift+arrows select text, hide it once the
     /// selection is gone.
@@ -4992,7 +5029,18 @@ impl App {
                 self.selection_action_bar = None;
             }
         } else if self.selection_action_bar.is_some() {
-            self.dismiss_selection_actions();
+            // Editing keys natively delete/replace the input selection
+            // (Backspace erases it, typing replaces it). Dismissing first
+            // would collapse the selection so the edit lands on a single
+            // cursor instead — preserve it and let the input handle it.
+            if self.input.has_selection() && Self::is_input_edit_key(key) {
+                self.chat_state.chat.selection.clear();
+                self.jobs_dialog_state.clear_selection();
+                self.pending_chat_message_click = None;
+                self.selection_action_bar = None;
+            } else {
+                self.dismiss_selection_actions();
+            }
         } else {
             self.chat_state.chat.selection.clear();
         }

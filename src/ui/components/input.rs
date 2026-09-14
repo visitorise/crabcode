@@ -821,6 +821,26 @@ impl Input {
             }
             KeyCode::Tab => false,
             KeyCode::Esc => false,
+            // Native behavior: Backspace/Delete with an active selection
+            // erases the selection. These must come before the placeholder
+            // fast-paths so a selection containing a placeholder deletes
+            // the whole selection (with sync cleanup), not just the placeholder.
+            KeyCode::Backspace if self.has_selection() => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.textarea.delete_char();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
+            KeyCode::Delete if self.has_selection() => {
+                self.reveal_cursor_after_key_input();
+                self.preferred_visual_col = None;
+                self.textarea.delete_next_char();
+                self.sync_image_placeholders();
+                self.sync_pending_pastes();
+                true
+            }
             KeyCode::Backspace if self.remove_placeholder_at_cursor(false) => true,
             KeyCode::Backspace if has_command_modifier(event.modifiers) => {
                 self.command_backspace_to_line_start();
@@ -1084,6 +1104,15 @@ impl Input {
     /// Delete the word before the cursor. Handles multi-byte emoji correctly
     /// (works around a tui-textarea bug in find_word_start_backward).
     fn delete_word_backward(&mut self) {
+        // Native behavior: word-delete with an active selection deletes the
+        // selection instead of a word. Without this guard the loop below
+        // would delete the selection AND extra characters, since the word
+        // boundary is computed from the selection edge.
+        if self.has_selection() {
+            self.textarea.delete_char();
+            return;
+        }
+
         let (row, cursor_col) = self.textarea.cursor();
         let lines = self.textarea.lines();
         let line = match lines.get(row) {
@@ -3599,5 +3628,46 @@ mod tests {
         assert!(input.has_selection());
         assert_eq!(input.get_selected_text(), "hello world");
         assert_eq!(input.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn backspace_deletes_shift_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        for _ in 0..5 {
+            assert!(input.handle_event(modified_key_event(KeyCode::Left, KeyModifiers::SHIFT,)));
+        }
+        assert!(input.has_selection(), "expected selection after shift-left");
+        assert_eq!(input.get_selected_text(), "world");
+        assert!(input.handle_event(key_event(KeyCode::Backspace)));
+        assert_eq!(input.get_text(), "hello ");
+        assert!(!input.has_selection());
+    }
+
+    #[test]
+    fn backspace_deletes_opt_shift_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert_eq!(input.get_selected_text(), "world");
+        assert!(input.handle_event(key_event(KeyCode::Backspace)));
+        assert_eq!(input.get_text(), "hello ");
+    }
+
+    #[test]
+    fn alt_backspace_with_selection_deletes_only_selection() {
+        let mut input = Input::new();
+        input.insert_str("hello world");
+        assert!(input.handle_event(modified_key_event(
+            KeyCode::Left,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(input.has_selection());
+        assert!(input.handle_event(modified_key_event(KeyCode::Backspace, KeyModifiers::ALT,)));
+        assert_eq!(input.get_text(), "hello ");
     }
 }
